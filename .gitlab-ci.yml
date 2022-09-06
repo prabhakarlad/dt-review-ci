@@ -1,0 +1,50 @@
+#image: registry.gitlab.com/robherring/docker-images/ubuntu-kernel-build
+image: buildpack-deps:22.04
+
+variables:
+  GIT_DEPTH: "1"
+  REPO: "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
+
+cache:
+  paths:
+    - "*base-*.log"
+
+before_script:
+  - export LANG='C.UTF-8'
+  - export LC_ALL='C.UTF-8'
+  - apt-get -qq -y update
+  - DEBIAN_FRONTEND=noninteractive apt-get -qq -y install
+       build-essential bc bison curl diffstat
+       flex git libyaml-0-2 libyaml-dev patchutils pkg-config python3-git
+       python3-pip python3-ply python3-sphinx python-is-python3 yamllint swig
+  - pip3 install pwclient==2.1.0
+  - pip3 install git+https://github.com/devicetree-org/dt-schema.git@master
+  - 'echo -e "[options]\ndefault=devicetree-bindings\n[devicetree-bindings]\nurl=https://patchwork.ozlabs.org/xmlrpc/\nusername: $PW_USER\npassword: $PW_PASSWORD" > ~/.pwclientrc'
+  - git config --global user.email nobody@nowhere
+  - git config --global user.name "Nobody Nowhere"
+  - git clone https://gitlab.com/robherring/pw-utils.git
+  - export PATH="$CI_PROJECT_DIR/pw-utils:$PATH"
+
+job-check-pw:
+  stage: .pre
+  script:
+    - test $(pwclient list -s New -a no | wc -l) -gt 2
+
+job-dt-binding-check:
+  dependencies:
+    - job-check-pw
+  parallel: 3
+  artifacts:
+    when: always
+    expire_in: 3 mos
+    paths:
+      - "linux/*.log"
+  script:
+    - git clone --depth=1 -b $(git ls-remote -t ${REPO} | grep -o 'v[3-9].*-rc1$' | tail -1) ${REPO} linux
+    - cp *.log linux/ || true
+    - cd linux
+    - git log -1
+    - pw-checks
+    - cd ..
+    - cp linux/*base-*.log .
+
