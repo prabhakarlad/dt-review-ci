@@ -1,0 +1,278 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright 2018-2022 Rob Herring <robh@kernel.org>
+#!/bin/bash -e
+
+. pw-utils.sh
+
+check_already_reviewed()
+{
+	pwid=$1
+
+	if grep -q -E "^(Acked|Reviewed)-by: Rob Herring"; then
+		return 1
+	fi
+
+	return 0
+}
+
+check_patch()
+{
+	pwid=$1
+	logfile="checkpatch-$pwid.log"
+
+	scripts/checkpatch.pl --ignore FILE_PATH_CHANGES - > $logfile
+	if [ $? -ne 0 ]; then
+		echo "$pwid: checkpatch fail"
+	else
+		echo "$pwid: checkpatch pass"
+		truncate -s0 $logfile
+	fi
+}
+
+check_patch_update_pw()
+{
+	pwid=$1
+	logfile="checkpatch-$pwid.log"
+
+	[ -f $logfile ] || return
+
+	if [ -s $logfile ]; then
+		check=$(grep '^total:' $logfile)
+		my_pwclient check-create -c checkpatch -s warning -d "$check" -u "$CI_JOB_URL/artifacts/file/$logfile" $pwid
+		return 1
+	else
+		my_pwclient check-create -c checkpatch -s success $pwid
+		rm $logfile
+		return 0
+	fi
+}
+
+apply_patch()
+{
+	pwid=$1
+	logfile="applypatch-$pwid.log"
+
+	# Keep only portions we care about testing
+	temp_patch=$(filterdiff -v -i '*MAINTAINERS' -i '*Documentation/*' -i '*include/dt-bindings/*')
+
+	git am -q -3 <<< $temp_patch 2> $logfile
+	if [ $? -ne 0 ]; then
+		git am --abort
+		# Try again without MAINTAINERS
+		temp_patch=$(filterdiff -v -i '*Documentation/*' -i '*include/dt-bindings/*' <<< $temp_patch)
+		git am -q -3 <<< $temp_patch 2> $logfile
+		if [ $? -ne 0 ]; then
+			git am --abort
+			return 1
+		fi
+	fi
+	return 0
+}
+
+apply_patch_update_pw()
+{
+	pwid=$1
+	logfile="applypatch-$pwid.log"
+
+	[ -f $logfile ] || return 0
+
+	if [ -s $logfile ]; then
+		my_pwclient check-create -c patch-applied -s fail -d "build log" -u "$CI_JOB_URL/artifacts/file/$logfile" $pwid
+		return 1
+	else
+		my_pwclient check-create -c patch-applied -s success $pwid
+		rm $logfile
+		return 0
+	fi
+}
+
+baselinelog="base-$(git describe --always).log"
+
+gen_baseline_log()
+{
+	[ -f "$baselinelog" ] && return
+
+	echo "Generating baseline log..."
+	make -s ARCH=arm allmodconfig
+	make -s ARCH=arm refcheckdocs 2>&1 | tee doc-links-${baselinelog}
+	make -O -j$(nproc) -s ARCH=arm DT_CHECKER_FLAGS=-m dt_binding_check 2>&1 | tee ${baselinelog}
+}
+
+dt_bindings_check_test_patch()
+{
+	pwid=$1
+	IFS=' '
+	logfile="build-$pwid.log"
+
+	make -s ARCH=arm refcheckdocs 2>&1 | tee temp-doc-links.log
+	make -O -j$(nproc) -s ARCH=arm DT_CHECKER_FLAGS=-m dt_binding_check 2>&1 | tee temp.log
+	ret=${PIPESTATUS[0]}
+
+	# filter out any expected warnings
+	tmplog="$(filter-warnings ${baselinelog} temp.log)"
+	echo "$tmplog" > temp.log
+
+	echo "yamllint warnings/errors:" > $logfile
+	sed -n -E '/\[(warning|error)\]/p' temp.log >> $logfile
+	sed -i -E '/\[(warning|error)\]/d' temp.log
+	echo "" >> $logfile
+
+	echo "dtschema/dtc warnings/errors:" >> $logfile
+	cat temp.log >> $logfile
+
+	echo -e "\ndoc reference errors (make refcheckdocs):" >> $logfile
+	echo "$(filter-warnings doc-links-${baselinelog} temp-doc-links.log)" >> $logfile
+
+	rm temp.log temp-doc-links.log
+
+	if grep -E '\.(yaml|dts|dtb):' $logfile; then
+		ret=1
+	fi
+
+	if [ $ret -ne 0 ]; then
+		git reset --hard $git_head
+	else
+		truncate -s0 $logfile
+	fi
+	return $ret
+}
+
+dt_bindings_check_update_pw()
+{
+	pwid=$1
+	logfile="build-$pwid.log"
+
+	[ -f $logfile ] || return 0
+
+	if [ -s $logfile ]; then
+		my_pwclient check-create -c dt-meta-schema -s fail -d "build log" -u "$CI_JOB_URL/artifacts/file/$logfile" $pwid
+		return 1
+	else
+		my_pwclient check-create -c dt-meta-schema -s success $pwid
+		rm $logfile
+		return 0
+	fi
+}
+
+
+dtbs_check_test_patch()
+{
+	pwid=$1
+	IFS=' '
+	logfile="build-dtbs-$pwid.log"
+	rm -f $logfile
+
+	# Disable options that cause make warnings
+	cfg_opts="CONFIG_ARM64_ERRATUM_843419=n CONFIG_ARM64_USE_LSE_ATOMICS=n CONFIG_BROKEN_GAS_INST=n"
+
+	for arch in arm arm64; do
+		make -s mrproper
+		make -s ARCH=$arch $cfg_opts allmodconfig
+		make -O -j$(nproc) -s ARCH=$arch $cfg_opts DT_SCHEMA_FILES="$2" dtbs_check 2>&1 | tee -a $logfile
+
+		# Filter dtc warnings out
+		sed -i -E '/(: Warning|also defined at)/d' $logfile
+
+		sed -n -i -E '/arch\/.*\.dtb: .*/p'
+	done
+
+	return 0
+}
+
+dtbs_check_update_pw()
+{
+	pwid=$1
+	logfile="build-dtbs-$pwid.log"
+
+	[ -f $logfile ] || return 0
+
+	if [ -s $logfile ]; then
+		my_pwclient check-create -c dtbs-check -s warning -d "build log" -u "$CI_JOB_URL/artifacts/file/$logfile" $pwid
+		return 1
+	else
+		my_pwclient check-create -c dtbs-check -s success $pwid
+		rm $logfile
+		return 0
+	fi
+}
+
+update_pw_state()
+{
+	pwid=$1
+
+	check_patch_update_pw $pwid
+	apply_patch_update_pw $pwid
+	dtbs_check_update_pw $pwid
+	dt_bindings_check_update_pw $pwid
+
+	# If no failures and already reviewed, move to N/A
+	pwclient check-get -f '%{context}: %{state} %{patch_id} %{target_url}' $pwid | grep -q -F "dt-meta-schema: fail"
+	if [ $? -ne 0 ]; then
+		pwclient view $pwid | check_already_reviewed $pwid
+		if [ $? -ne 0 ]; then
+			echo "Already Reviewed: $pwid"
+			my_pwclient update -s "Not Applicable" $pwid
+			return
+		fi
+	fi
+
+	echo "Needs Review: $pwid"
+	my_pwclient update -s Needs $pwid
+}
+
+
+# Get the list of patches to process
+[ -f "pw-todo-${CI_NODE_INDEX}" ] || exit 0
+
+patches="$(cat pw-todo-${CI_NODE_INDEX})"
+
+echo "$patches"
+
+IFS=' '
+my_pwclient update -s Under $(get_patch_pw_id "$patches")
+
+
+# Get Linux tree
+git clone --depth=1 -b $(git ls-remote -t ${REPO} | grep -o 'v[3-9].*-rc1$' | tail -1) ${REPO} linux
+cp *.log linux/ || true
+cd linux
+git log -1
+git_head=$(git rev-parse HEAD)
+
+gen_baseline_log
+
+IFS='
+'
+for id in ${patches}; do
+	pwid=$(get_patch_pw_id "$id")
+	date
+	echo $id
+	rm -f *-$pwid.log
+
+	patch=$(pwclient view $pwid)
+
+	check_patch $pwid <<< "$patch"
+
+	apply_patch $pwid <<< $patch
+	applied=$?
+
+	schema_files="$(diffstat -p0 -l <<< $patch | grep -o 'Documentation.*\.yaml$' | xargs)"
+	if [ $applied -eq 0 -a -n "${schema_files}" ]; then
+		dt_bindings_check_test_patch $pwid && \
+		dtbs_check_test_patch $pwid "${schema_files}"
+	fi
+
+	# Wait til end to update state
+	ids="${ids} ${pwid}"
+done
+
+# Update the state at the end in case we timeout
+IFS=' '
+for id in $ids; do
+	update_pw_state $id
+done
+
+# Clean-up
+make -s ARCH=arm mrproper
+cd ..
+cp linux/*.log .

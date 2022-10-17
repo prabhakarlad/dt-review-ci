@@ -22,13 +22,16 @@ before_script:
   - 'echo -e "[options]\ndefault=devicetree-bindings\n[devicetree-bindings]\nurl=https://patchwork.ozlabs.org/xmlrpc/\nusername: $PW_USER\npassword: $PW_PASSWORD" > ~/.pwclientrc'
   - git config --global user.email nobody@nowhere
   - git config --global user.name "Nobody Nowhere"
-  - git clone https://gitlab.com/robherring/pw-utils.git
-  - export PATH="$CI_PROJECT_DIR/pw-utils:$PATH"
+  - export PATH="$(pwd):$PATH"
 
 job-check-pw:
   stage: .pre
   script:
-    - test $(pwclient list -s New -a no | wc -l) -gt 2
+    - pw-get-patches
+  artifacts:
+    paths:
+      - pw-todo-*
+    expire_in: 1h
 
 job-dt-binding-check:
   dependencies:
@@ -40,12 +43,5 @@ job-dt-binding-check:
     paths:
       - "*.log"
   script:
-    - sleep "$(($RANDOM / 1024))"
-    - git clone --depth=1 -b $(git ls-remote -t ${REPO} | grep -o 'v[3-9].*-rc1$' | tail -1) ${REPO} linux
-    - cp *.log linux/ || true
-    - cd linux
-    - git log -1
     - pw-checks
-    - cd ..
-    - cp linux/*.log .
 

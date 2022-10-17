@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright 2018-2022 Rob Herring <robh@kernel.org>
+#!/bin/bash -e
+
+. pw-utils.sh
+
+check_duplicate_patches()
+{
+	echo "Processing duplicate patches..." >&2
+
+	todo="$(pwclient list -a no -N 1000 -f '%{id} "%{state}" %{msgid} "%{name}"' | grep -E '^[0-9]+ "(New|Needs|Under)')"
+	IFS='
+'
+	for subject in $(get_patch_subject "$todo" | sort -u); do
+		matches=$(grep -F "$subject" <<< $todo | tac | tail -n +2)
+
+		ids="$(get_patch_pw_id "$matches")"
+		[ -z "$ids" ] && continue
+
+		echo -e "Duplicates for \"$subject\":\n$ids" >&2
+		IFS=' '
+		my_pwclient update -s "Superseded" $ids
+	done
+}
+
+get_pending_patches()
+{
+    job_num=1
+    rm -rf pw-todo*
+
+	todo=$(pwclient list -a no -s New -f '%{id} "%{state}" %{msgid} "%{name}"')
+	IFS='
+'
+	for id in ${todo}; do
+		pwid=$(get_patch_pw_id "$id")
+
+		patch=$(pwclient view $pwid)
+
+		in_reply_to=$(echo "$patch" | sed -n 's/^In-Reply-To:.*\(<.*>\)/\1/p')
+		echo "In-Reply-To: >>$in_reply_to<<" >&2
+		# No In-Reply-To on 1st patch if no cover letter
+		if [ -z "$in_reply_to" ]; then
+			in_reply_to=$(echo "$patch" | sed -n 's/^Message-Id:.*\(<.*>\)/\1/p')
+			echo "Message-Id: >>$in_reply_to<<" >&2
+		fi
+
+		[ -z "$old_in_reply_to" ] && old_in_reply_to="$in_reply_to"
+
+		if [ "$in_reply_to" != "$old_in_reply_to" ]; then
+            job_num=$(($job_num + 1))
+
+            [ ${job_num} -gt 5 ] && break
+		fi
+
+		echo "$id" >> pw-todo-${job_num}
+	done
+
+    [ -f "pw-todo-1" ]
+}
+
+check_duplicate_patches
+get_pending_patches
