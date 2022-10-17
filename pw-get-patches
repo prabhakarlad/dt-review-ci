@@ -25,7 +25,7 @@ check_duplicate_patches()
 
 get_pending_patches()
 {
-	job_num=1
+	job_num=0
 	rm -rf pw-todo*
 
 	todo=$(pwclient list -a no -s New -f '%{id} "%{state}" %{msgid} "%{name}"')
@@ -44,10 +44,9 @@ get_pending_patches()
 			echo "Message-Id: >>$in_reply_to<<" >&2
 		fi
 
-		[ -z "$old_in_reply_to" ] && old_in_reply_to="$in_reply_to"
-
 		if [ "$in_reply_to" != "$old_in_reply_to" ]; then
 			job_num=$(($job_num + 1))
+			old_in_reply_to="$in_reply_to"
 
 			[ ${job_num} -gt 5 ] && break
 			echo "Job ${job_num}:"
